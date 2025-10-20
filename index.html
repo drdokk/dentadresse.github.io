@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>Carte des dentistes - Saint-Étienne</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no">
+  <meta name="theme-color" content="#0099cc">
+
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon-192.png" sizes="192x192" type="image/png">
+  <link rel="apple-touch-icon" href="icon-512.png" sizes="512x512">
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.Default.css" />
+
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      font-family: sans-serif;
+    }
+    #map {
+      height: 100%;
+      width: 100%;
+    }
+    #fileInput {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 1000;
+      background: white;
+      padding: 6px;
+      border-radius: 8px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+    }
+  </style>
+</head>
+<body>
+  <input type="file" id="fileInput" accept=".csv">
+  <div id="map"></div>
+
+  <div id="trackingControls" style="position:absolute;right:10px;top:10px;z-index:1000;background:white;padding:6px;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,.3);">
+  <button id="startTrack">Démarrer le suivi</button>
+  <button id="stopTrack" disabled>Arrêter</button>
+  <label style="display:block;margin-top:6px;"><input type="checkbox" id="followMe" checked> Suivre</label>
+</div>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.markercluster/dist/leaflet.markercluster.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+
+  <script>
+    const map = L.map('map', { tap: false }).setView([45.4397, 4.3872], 13);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap'
+    }).addTo(map);
+
+    const markerCluster = L.markerClusterGroup();
+    map.addLayer(markerCluster);
+
+    // Lecture CSV local
+    document.getElementById('fileInput').addEventListener('change', (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+      Papa.parse(file, {
+        header: true,
+        download: false,
+        complete: function(results) {
+          afficherDentistes(results.data);
+        }
+      });
+    });
+
+    function afficherDentistes(data) {
+      markerCluster.clearLayers();
+      data.forEach(row => {
+        if (!row.lat || !row.lon) return;
+        const marker = L.marker([parseFloat(row.lat), parseFloat(row.lon)]);
+        const popup = `
+          <strong>${row.name || ''}</strong><br>
+          ${row.address || ''}<br>
+          ${row.mode || ''}<br>
+          RPPS: ${row.rpps || ''}
+        `;
+        marker.bindPopup(popup);
+        markerCluster.addLayer(marker);
+      });
+      if (data.length > 0) {
+        const valid = data.filter(d => d.lat && d.lon);
+        const bounds = L.latLngBounds(valid.map(d => [d.lat, d.lon]));
+        map.fitBounds(bounds);
+      }
+    }
+
+    // Service worker
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('service-worker.js')
+        .then(() => console.log('✅ Service worker enregistré'))
+        .catch(err => console.error('Erreur SW:', err));
+    }
+
+    /* === Suivi de position en temps réel (Geolocation watchPosition) === */
+
+let watchId = null;
+let meMarker = null;
+let accuracyCircle = null;
+let trackPolyline = null;
+let trackLatLngs = [];
+
+// Options de watchPosition (à ajuster selon autonomie / précision)
+const geoOptions = {
+  enableHighAccuracy: true,   // demande GPS si possible
+  maximumAge: 1000,           // accepte cache de 1s max
+  timeout: 10000              // timeout 10s
+};
+
+// boutons
+const startBtn = document.getElementById('startTrack');
+const stopBtn = document.getElementById('stopTrack');
+const followCheckbox = document.getElementById('followMe');
+
+startBtn.addEventListener('click', startTracking);
+stopBtn.addEventListener('click', stopTracking);
+
+function startTracking() {
+  if (!('geolocation' in navigator)) {
+    alert('Géolocalisation non supportée par ce navigateur.');
+    return;
+  }
+  // demande de permission et commence le suivi
+  watchId = navigator.geolocation.watchPosition(onPosition, onPosError, geoOptions);
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+  console.log('Suivi démarré (watchId):', watchId);
+}
+
+function stopTracking() {
+  if (watchId !== null) {
+    navigator.geolocation.clearWatch(watchId);
+    watchId = null;
+  }
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  console.log('Suivi arrêté');
+}
+
+// callback position
+function onPosition(position) {
+  const lat = position.coords.latitude;
+  const lon = position.coords.longitude;
+  const accuracy = position.coords.accuracy; // en mètres
+  const heading = position.coords.heading;   // null si non disponible
+  const speed = position.coords.speed;       // m/s, si dispo
+
+  // mise à jour marqueur "moi"
+  if (!meMarker) {
+    meMarker = L.marker([lat, lon], {title: "Ma position"});
+    meMarker.addTo(map);
+  } else {
+    meMarker.setLatLng([lat, lon]);
+  }
+
+  // mise à jour cercle de précision
+  if (!accuracyCircle) {
+    accuracyCircle = L.circle([lat, lon], {radius: accuracy});
+    accuracyCircle.addTo(map);
+  } else {
+    accuracyCircle.setLatLng([lat, lon]);
+    accuracyCircle.setRadius(accuracy);
+  }
+
+  // ajout à la trace (polyline)
+  trackLatLngs.push([lat, lon]);
+  if (!trackPolyline) {
+    trackPolyline = L.polyline(trackLatLngs, {weight: 4, opacity: 0.8});
+    trackPolyline.addTo(map);
+  } else {
+    trackPolyline.setLatLngs(trackLatLngs);
+  }
+
+  // recentrer si mode "follow" activé
+  if (followCheckbox.checked) {
+    // on adapte le zoom si on n'a pas de bounds utiles
+    map.panTo([lat, lon], {animate: true});
+  }
+
+  // console log utile pour debug
+  console.log(`Pos update: ${lat.toFixed(6)}, ${lon.toFixed(6)} (acc=${accuracy}m, speed=${speed})`);
+
+  // Optionnel : envoyer position au serveur (voir la section ci-dessous)
+  // sendPositionToServer({lat, lon, accuracy, heading, speed, timestamp: position.timestamp});
+}
+
+function onPosError(err) {
+  console.error('Erreur géoloc:', err);
+  switch(err.code) {
+    case err.PERMISSION_DENIED:
+      alert('Permission de géolocalisation refusée.');
+      break;
+    case err.POSITION_UNAVAILABLE:
+      alert('Position indisponible.');
+      break;
+    case err.TIMEOUT:
+      alert('Timeout de la géolocalisation.');
+      break;
+  }
+}
+
+/* === Option : fonction d'envoi au serveur (si tu veux centraliser) ===
+   ATTENTION : si tu fais cela, tu dois informer et obtenir le consentement des personnes (RGPD),
+   sécuriser la connexion (HTTPS) et protéger les données.
+*/
+// async function sendPositionToServer(payload) {
+//   try {
+//     // exemple : POST JSON vers /api/positions
+//     await fetch('https://ton-serveur.exemple/api/positions', {
+//       method: 'POST',
+//       headers: {'Content-Type': 'application/json'},
+//       body: JSON.stringify(payload)
+//     });
+//   } catch (e) {
+//     console.warn('Erreur envoi position:', e);
+//   }
+// }
+
+// Option : bouton pour effacer la trace
+const clearBtn = document.createElement('button');
+clearBtn.textContent = 'Effacer trace';
+clearBtn.style.display = 'block';
+clearBtn.style.marginTop = '6px';
+document.getElementById('trackingControls').appendChild(clearBtn);
+clearBtn.addEventListener('click', () => {
+  trackLatLngs = [];
+  if (trackPolyline) { map.removeLayer(trackPolyline); trackPolyline = null; }
+});
+  </script>
+</body>
+</html>
