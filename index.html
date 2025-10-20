@@ -35,6 +35,32 @@
       border-radius: 8px;
       box-shadow: 0 2px 6px rgba(0,0,0,0.3);
     }
+
+.pulse {
+  width: 20px;
+  height: 20px;
+  background: rgba(0, 123, 255, 0.4);
+  border-radius: 50%;
+  position: relative;
+}
+
+.pulse::after {
+  content: "";
+  width: 20px;
+  height: 20px;
+  position: absolute;
+  left: 0;
+  top: 0;
+  border-radius: 50%;
+  animation: pulse 2s infinite;
+  background: rgba(0, 123, 255, 0.4);
+}
+
+@keyframes pulse {
+  0% { transform: scale(1); opacity: 1; }
+  100% { transform: scale(3); opacity: 0; }
+}
+
   </style>
 </head>
 <body>
@@ -158,8 +184,14 @@ function onPosition(position) {
 
   // mise à jour marqueur "moi"
   if (!meMarker) {
-    meMarker = L.marker([lat, lon], {title: "Ma position"});
-    meMarker.addTo(map);
+
+    const meIcon = L.divIcon({
+      html: '<div class="pulse"></div>',
+      iconSize: [20, 20],
+      className: ''
+    });
+
+    meMarker = L.marker([lat, lon], { icon: meIcon }).addTo(map);
   } else {
     meMarker.setLatLng([lat, lon]);
   }
